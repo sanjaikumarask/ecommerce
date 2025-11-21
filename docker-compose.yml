@@ -1,0 +1,221 @@
+# docker-compose.yml
+
+
+networks:
+  backend:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  static_volume:
+  media_volume:
+  beat_data:
+
+services:
+
+  # -------------------- DATABASE --------------------
+  db:
+    image: postgres:15
+    container_name: ecommerce_db
+    restart: always
+    env_file: .env
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $POSTGRES_USER"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - backend
+
+  # -------------------- REDIS --------------------
+  redis:
+    image: redis:7
+    container_name: ecommerce_redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - backend
+
+  # -------------------- DJANGO (Daphne for WebSockets) --------------------
+  web:
+    build: .
+    container_name: ecommerce_web
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    entrypoint: ["/app/docker-entrypoint.sh"]
+    # pass the MODE to the entrypoint; entrypoint will run Daphne when MODE=web
+    command: ["web"]
+    ports:
+      - "8000:8000"
+    env_file: .env
+    volumes:
+      - .:/app:cached
+      - static_volume:/app/staticfiles
+      - media_volume:/app/media
+    networks:
+      - backend
+
+  # -------------------- CELERY WORKER --------------------
+  worker:
+    build: .
+    container_name: ecommerce_worker
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    entrypoint: ["/app/docker-entrypoint.sh"]
+    command: ["worker"]
+    env_file: .env
+    volumes:
+      - .:/app:cached
+      - media_volume:/app/media
+    networks:
+      - backend
+
+  # -------------------- CELERY BEAT --------------------
+  beat:
+    build: .
+    container_name: ecommerce_beat
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    entrypoint: ["/app/docker-entrypoint.sh"]
+    command: ["beat"]
+    env_file: .env
+    volumes:
+      - .:/app:cached
+      - beat_data:/app/celery-data
+      - media_volume:/app/media
+    networks:
+      - backend
+
+  # -------------------- FRONTEND (NGINX serving built SPA) --------------------
+  frontend:
+    build: ./frontend
+    container_name: ecommerce_frontend
+    depends_on:
+      - web
+    ports:
+      - "3000:80"
+    volumes:
+      - ./frontend/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - backend
+
+  # -------------------- ZOOKEEPER --------------------
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.3.0
+    container_name: ecommerce_zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+    networks:
+      - backend
+
+  # -------------------- KAFKA --------------------
+  kafka:
+    image: confluentinc/cp-kafka:7.3.0
+    container_name: ecommerce_kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: "zookeeper:2181"
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    networks:
+      - backend
+
+  # -------------------- KAFKA WORKERS --------------------
+  orders_worker:
+    build: .
+    container_name: ecommerce_orders_worker
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    entrypoint: ["/app/docker-entrypoint.sh"]
+    command: ["orders_worker"]
+    env_file: .env
+    volumes:
+      - .:/app:cached
+      - media_volume:/app/media
+    networks:
+      - backend
+
+  payments_worker:
+    build: .
+    container_name: ecommerce_payments_worker
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    entrypoint: ["/app/docker-entrypoint.sh"]
+    command: ["payment_worker"]
+    env_file: .env
+    volumes:
+      - .:/app:cached
+      - media_volume:/app/media
+    networks:
+      - backend
+
+  billing_worker:
+    build: .
+    container_name: ecommerce_billing_worker
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    entrypoint: ["/app/docker-entrypoint.sh"]
+    command: ["billing_worker"]
+    env_file: .env
+    volumes:
+      - .:/app:cached
+      - media_volume:/app/media
+    networks:
+      - backend
+
+  notifications_worker:
+    build: .
+    container_name: ecommerce_notifications_worker
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    entrypoint: ["/app/docker-entrypoint.sh"]
+    command: ["notifications_worker"]
+    env_file: .env
+    volumes:
+      - .:/app:cached
+      - media_volume:/app/media
+    networks:
+      - backend
